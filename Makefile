@@ -133,6 +133,8 @@ app: daemon
     <string>APPL</string>\n\
     <key>LSUIElement</key>\n\
     <true/>\n\
+    <key>NSMicrophoneUsageDescription</key>\n\
+    <string>Voxtral needs microphone access to dictate text into your active windows.</string>\n\
 </dict>\n\
 </plist>' > Voxtral.app/Contents/Info.plist
 	@echo ""
