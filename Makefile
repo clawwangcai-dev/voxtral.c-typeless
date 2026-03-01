@@ -18,7 +18,7 @@ TARGET = voxtral
 # Debug build flags
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug info help blas mps inspect test
+.PHONY: all clean debug info help blas mps inspect test daemon
 
 # Default: show available targets
 all: help
@@ -96,6 +96,34 @@ mps:
 endif
 
 # =============================================================================
+# Daemon: voxtral-daemon (macOS voice dictation, requires MPS)
+# =============================================================================
+ifeq ($(UNAME_S),Darwin)
+ifeq ($(UNAME_M),arm64)
+DAEMON_SRC = voxtral_daemon.m
+DAEMON_FRAMEWORKS = -framework AppKit -framework Carbon -framework CoreGraphics
+
+libvoxtral-mps.a: $(SRCS:.c=.mps.o) voxtral_metal.o
+	ar rcs $@ $^
+
+daemon: libvoxtral-mps.a $(DAEMON_SRC)
+	$(CC) $(MPS_OBJCFLAGS) -o voxtral-daemon $(DAEMON_SRC) \
+		-L. -lvoxtral-mps $(MPS_LDFLAGS) $(DAEMON_FRAMEWORKS)
+	@echo ""
+	@echo "Built voxtral-daemon (macOS voice dictation)"
+	@echo "Usage: ./voxtral-daemon -d voxtral-model"
+else
+daemon:
+	@echo "Error: daemon requires Apple Silicon (arm64)"
+	@exit 1
+endif
+else
+daemon:
+	@echo "Error: daemon requires macOS"
+	@exit 1
+endif
+
+# =============================================================================
 # Build rules
 # =============================================================================
 $(TARGET): $(OBJS) main.o
@@ -128,6 +156,7 @@ test:
 clean:
 	rm -f $(OBJS) *.mps.o voxtral_metal.o main.o inspect_weights.o $(TARGET) inspect_weights
 	rm -f voxtral_shaders_source.h
+	rm -f voxtral-daemon libvoxtral-mps.a
 
 info:
 	@echo "Platform: $(UNAME_S) $(UNAME_M)"
