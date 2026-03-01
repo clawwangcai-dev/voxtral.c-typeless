@@ -7,3 +7,4 @@ pyenv*/
 misc/
 *.o
 基于-Voxtral.c-的实时语音听写与窗口文本注入系统构建指南.md
+wechat_article.md
