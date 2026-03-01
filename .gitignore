@@ -1,5 +1,7 @@
 voxtral_shaders_source.h
 voxtral
+voxtral-daemon
+libvoxtral*.a
 voxtral-model/
 pyenv*/
 misc/

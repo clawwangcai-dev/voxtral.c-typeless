@@ -28,6 +28,11 @@ make mps       # Apple Silicon (fastest)
 # Live microphone transcription (macOS, Ctrl+C to stop)
 ./voxtral -d voxtral-model --from-mic
 
+# macOS background daemon: dictate into any active window
+make daemon
+./voxtral-daemon -d voxtral-model
+# Then press Option+Space to start/stop dictating
+
 # Pipe any format via ffmpeg
 ffmpeg -i audio.mp3 -f s16le -ar 16000 -ac 1 - 2>/dev/null | \
     ./voxtral -d voxtral-model --stdin
@@ -158,6 +163,14 @@ The **`--from-mic` flag** captures audio from the default microphone (macOS only
 ./voxtral -d voxtral-model --from-mic -I 1.0          # lower latency
 ./voxtral -d voxtral-model --from-mic --silent         # no stderr status
 ```
+
+**macOS Dictation Daemon**
+Alternatively, you can build the background dictation daemon (`make daemon`). It runs in the background and lets you inject transcribed text directly into your current active window anywhere in macOS:
+
+```bash
+./voxtral-daemon -d voxtral-model
+```
+Once running, press **Option+Space** anywhere to toggle listening on/off. A menu bar icon (🎤/🔴) will show the current status. The daemon requires Accessibility permissions to synthesize keyboard events.
 
 If the model falls behind real-time, a warning is printed and audio is skipped to catch up.
 
