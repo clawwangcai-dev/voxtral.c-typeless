@@ -112,6 +112,35 @@ daemon: libvoxtral-mps.a $(DAEMON_SRC)
 	@echo ""
 	@echo "Built voxtral-daemon (macOS voice dictation)"
 	@echo "Usage: ./voxtral-daemon -d voxtral-model"
+
+app: daemon
+	@echo "Packaging Voxtral.app..."
+	@rm -rf Voxtral.app
+	@mkdir -p Voxtral.app/Contents/MacOS
+	@mkdir -p Voxtral.app/Contents/Resources
+	@cp voxtral-daemon Voxtral.app/Contents/MacOS/Voxtral
+	@echo '<?xml version="1.0" encoding="UTF-8"?>\n\
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n\
+<plist version="1.0">\n\
+<dict>\n\
+    <key>CFBundleExecutable</key>\n\
+    <string>Voxtral</string>\n\
+    <key>CFBundleIdentifier</key>\n\
+    <string>com.voxtral.daemon</string>\n\
+    <key>CFBundleName</key>\n\
+    <string>Voxtral</string>\n\
+    <key>CFBundlePackageType</key>\n\
+    <string>APPL</string>\n\
+    <key>LSUIElement</key>\n\
+    <true/>\n\
+</dict>\n\
+</plist>' > Voxtral.app/Contents/Info.plist
+	@echo ""
+	@echo "Created Voxtral.app bundle."
+	@echo "To use it:"
+	@echo "  1. Copy your 'voxtral-model' folder inside Voxtral.app/Contents/Resources/"
+	@echo "  2. Or place 'voxtral-model' right next to Voxtral.app"
+	@echo "  3. Double click Voxtral.app to launch"
 else
 daemon:
 	@echo "Error: daemon requires Apple Silicon (arm64)"
@@ -157,6 +186,7 @@ clean:
 	rm -f $(OBJS) *.mps.o voxtral_metal.o main.o inspect_weights.o $(TARGET) inspect_weights
 	rm -f voxtral_shaders_source.h
 	rm -f voxtral-daemon libvoxtral-mps.a
+	rm -rf Voxtral.app
 
 info:
 	@echo "Platform: $(UNAME_S) $(UNAME_M)"

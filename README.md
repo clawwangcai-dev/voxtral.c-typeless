@@ -28,9 +28,10 @@ make mps       # Apple Silicon (fastest)
 # Live microphone transcription (macOS, Ctrl+C to stop)
 ./voxtral -d voxtral-model --from-mic
 
-# macOS background daemon: dictate into any active window
-make daemon
-./voxtral-daemon -d voxtral-model
+# macOS background app: dictate into any active window
+make app
+# Place 'voxtral-model' into Voxtral.app/Contents/Resources/ or alongside it
+# Double-click Voxtral.app to launch the menu bar daemon
 # Then press Option+Space to start/stop dictating
 
 # Pipe any format via ffmpeg
@@ -164,13 +165,17 @@ The **`--from-mic` flag** captures audio from the default microphone (macOS only
 ./voxtral -d voxtral-model --from-mic --silent         # no stderr status
 ```
 
-**macOS Dictation Daemon**
-Alternatively, you can build the background dictation daemon (`make daemon`). It runs in the background and lets you inject transcribed text directly into your current active window anywhere in macOS:
+**macOS Standalone Application (Daemon)**
+You can build a standalone, double-clickable Mac App bundle (`make app`). It runs perfectly in the background, showing a menu bar icon, and lets you inject transcribed text directly into your current active window anywhere in macOS, without keeping a Terminal window open:
 
 ```bash
-./voxtral-daemon -d voxtral-model
+make app
 ```
-Once running, press **Option+Space** anywhere to toggle listening on/off. A menu bar icon (🎤/🔴) will show the current status. The daemon requires Accessibility permissions to synthesize keyboard events.
+To use it:
+1. Place the 8.9GB downloaded `voxtral-model` folder inside `Voxtral.app/Contents/Resources/` or right next to `Voxtral.app`.
+2. Double-click **Voxtral.app** to launch it.
+3. Press **Option+Space** anywhere to toggle listening on/off. A menu bar icon (🎤/🔴) will show the current status.
+*(The app will prompt you for Accessibility permission on first launch in order to synthesize keyboard events).*
 
 If the model falls behind real-time, a warning is printed and audio is skipped to catch up.
 
