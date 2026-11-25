@@ -18,7 +18,7 @@ TARGET = voxtral
 # Debug build flags
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug info help blas mps inspect test daemon
+.PHONY: all clean debug info help blas mps inspect test test-dictation daemon
 
 # Default: show available targets
 all: help
@@ -36,6 +36,7 @@ endif
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make test     - Run regression tests (slow, needs fast GPU)"
+	@echo "  make test-dictation - Run dictation unit tests (fast, no model needed)"
 	@echo "  make clean    - Remove build artifacts"
 	@echo "  make inspect  - Build safetensors weight inspector"
 	@echo "  make info     - Show build configuration"
@@ -178,7 +179,11 @@ inspect: inspect_weights.o voxtral_safetensors.o
 # =============================================================================
 # Test
 # =============================================================================
-test:
+test-dictation: test_dictation.c voxtral_dictation.c voxtral_dictation.h
+	$(CC) -Wall -Wextra -O2 -o test_dictation test_dictation.c voxtral_dictation.c -lm
+	./test_dictation
+
+test: test-dictation
 	@./runtest.sh
 
 # =============================================================================
@@ -188,6 +193,7 @@ clean:
 	rm -f $(OBJS) *.mps.o voxtral_metal.o main.o inspect_weights.o $(TARGET) inspect_weights
 	rm -f voxtral_shaders_source.h
 	rm -f voxtral-daemon libvoxtral-mps.a
+	rm -f test_dictation
 	rm -rf Voxtral.app
 
 info:
