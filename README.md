@@ -165,6 +165,10 @@ The **`--from-mic` flag** captures audio from the default microphone (macOS only
 ./voxtral -d voxtral-model --from-mic --silent         # no stderr status
 ```
 
+If the model falls behind real-time, a warning is printed and audio is skipped to catch up.
+
+`--from-mic`, `--stdin`, and `-i` are mutually exclusive.
+
 **macOS Standalone Application (Daemon)**
 You can build a standalone, double-clickable Mac App bundle (`make app`). It runs perfectly in the background, showing a menu bar icon, and lets you inject transcribed text directly into your current active window anywhere in macOS, without keeping a Terminal window open:
 
@@ -209,10 +213,6 @@ make test-dictation        # config parser, silence gate and text assembly (offl
 make test-api              # OpenAI session against the real service (needs network and a key; billed)
 make test-daemon           # startup checks for backend selection and failure reasons
 ```
-
-If the model falls behind real-time, a warning is printed and audio is skipped to catch up.
-
-`--from-mic`, `--stdin`, and `-i` are mutually exclusive.
 
 To convert files to WAV format, just use `ffmpeg`:
 

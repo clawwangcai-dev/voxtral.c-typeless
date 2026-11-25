@@ -450,17 +450,21 @@ static void api_idle(VoxOpenAIStatus status) {
   NSString *notice = nil;
   switch (status) {
   case VoxOpenAIStatusOK:
+  case VoxOpenAIStatusTailUnconfirmed: {
+    /* The cap gets its own sound and notice, so the user can tell that the
+     * time limit, not a fault, ended the dictation. */
+    NSString *tail =
+        status == VoxOpenAIStatusTailUnconfirmed ? @"结尾可能不完整" : nil;
     sound = g_cap_hit ? @"Glass" : @"Pop";
     icon = @"🎤";
     if (g_cap_hit)
       notice = [NSString
-          stringWithFormat:@"已到 %d 分钟上限，自动结束", g_max_minutes];
+          stringWithFormat:@"已到 %d 分钟上限，自动结束%@", g_max_minutes,
+                           tail ? [@"；" stringByAppendingString:tail] : @""];
+    else
+      notice = tail;
     break;
-  case VoxOpenAIStatusTailUnconfirmed:
-    sound = @"Pop";
-    icon = @"🎤";
-    notice = @"结尾可能不完整";
-    break;
+  }
   case VoxOpenAIStatusNetwork:
     notice = @"出错：网络";
     break;
@@ -554,10 +558,20 @@ static void api_start(void) {
              api_done(id, status);
            }];
 
-  g_state = STATE_LISTENING;
+  void *thread_ref = (__bridge_retained void *)g_session;
   g_audio_running = 1;
-  pthread_create(&g_audio_thread, NULL, api_audio_thread_func,
-                 (__bridge_retained void *)g_session);
+  if (pthread_create(&g_audio_thread, NULL, api_audio_thread_func,
+                     thread_ref) != 0) {
+    CFRelease(thread_ref); /* the thread never took its reference */
+    g_audio_running = 0;
+    vox_mic_stop();
+    g_dictation_id++;   /* the session's callbacks are now stale and dropped */
+    [g_session finish]; /* nothing was fed: closes the connection at once */
+    g_session = nil;
+    api_start_failed(@"出错：麦克风");
+    return;
+  }
+  g_state = STATE_LISTENING;
   [[NSSound soundNamed:@"Tink"] play];
   [g_delegate updateIcon:@"🔴" menuTitle:@"⌥Space 停止听写"];
   fprintf(stderr, "voxtral-daemon: listening...\n");

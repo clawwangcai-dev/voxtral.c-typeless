@@ -12,7 +12,7 @@
  * to float internally). Returns 0 on success, -1 on error. */
 int vox_mic_start(void);
 
-/* Same as vox_mic_start(), at the given sample rate in Hz. */
+/* Same as vox_mic_start(): 16-bit mono capture, at the given sample rate in Hz. */
 int vox_mic_start_rate(int sample_rate);
 
 /* Non-blocking read of available samples as float [-1,1].
