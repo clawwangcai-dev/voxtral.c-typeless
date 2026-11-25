@@ -18,7 +18,7 @@ TARGET = voxtral
 # Debug build flags
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug info help blas mps inspect test test-dictation daemon
+.PHONY: all clean debug info help blas mps inspect test test-dictation test-api daemon
 
 # Default: show available targets
 all: help
@@ -35,11 +35,14 @@ endif
 endif
 	@echo ""
 	@echo "Other targets:"
-	@echo "  make test     - Run regression tests (slow, needs fast GPU)"
+	@echo "  make test           - Run regression tests (slow, needs fast GPU)"
 	@echo "  make test-dictation - Run dictation unit tests (fast, no model needed)"
-	@echo "  make clean    - Remove build artifacts"
-	@echo "  make inspect  - Build safetensors weight inspector"
-	@echo "  make info     - Show build configuration"
+ifeq ($(UNAME_S),Darwin)
+	@echo "  make test-api       - Run OpenAI session tests (needs network and an API key)"
+endif
+	@echo "  make clean          - Remove build artifacts"
+	@echo "  make inspect        - Build safetensors weight inspector"
+	@echo "  make info           - Show build configuration"
 	@echo ""
 	@echo "Example: make blas && ./voxtral -d voxtral-model -i audio.wav"
 
@@ -183,6 +186,13 @@ test-dictation: test_dictation.c voxtral_dictation.c voxtral_dictation.h
 	$(CC) -Wall -Wextra -O2 -o test_dictation test_dictation.c voxtral_dictation.c -lm
 	./test_dictation
 
+ifeq ($(UNAME_S),Darwin)
+test-api: test_openai.m voxtral_openai.m voxtral_openai.h voxtral_dictation.c voxtral_audio.c
+	$(CC) -Wall -Wextra -O2 -fobjc-arc -o test_openai test_openai.m voxtral_openai.m \
+		voxtral_dictation.c voxtral_audio.c -framework Foundation -lm
+	./test_openai
+endif
+
 test: test-dictation
 	@./runtest.sh
 
@@ -193,7 +203,7 @@ clean:
 	rm -f $(OBJS) *.mps.o voxtral_metal.o main.o inspect_weights.o $(TARGET) inspect_weights
 	rm -f voxtral_shaders_source.h
 	rm -f voxtral-daemon libvoxtral-mps.a
-	rm -f test_dictation
+	rm -f test_dictation test_openai
 	rm -rf Voxtral.app
 
 info:
