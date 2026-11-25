@@ -4,7 +4,10 @@
  * Background daemon that uses voxtral.c C API for real-time speech-to-text
  * and injects transcribed text into the current active window via CGEvent.
  *
- * Usage: ./voxtral-daemon -d <model_dir> [-I <seconds>]
+ * Usage: ./voxtral-daemon [-d <model_dir>] [-I <seconds>] [--check]
+ *
+ * Settings come from ~/.config/voxtral/config; "backend = openai" sends audio
+ * to OpenAI instead of loading the local model.
  *
  * Controls:
  *   Option+Space  - Toggle dictation on/off
@@ -18,7 +21,9 @@
 #include <pthread.h>
 
 #include "voxtral.h"
+#include "voxtral_dictation.h"
 #include "voxtral_mic.h"
+#import "voxtral_openai.h"
 #ifdef USE_METAL
 #include "voxtral_metal.h"
 #endif
@@ -48,8 +53,13 @@ static vox_stream_t *g_stream = NULL;
 static pthread_t g_audio_thread;
 static volatile int g_audio_running = 0;
 static float g_interval = DAEMON_DEFAULT_INTERVAL;
+static BOOL g_backend_openai = NO;
+static NSString *g_api_key = nil; /* set only when g_backend_openai */
+static BOOL g_check_only = NO;    /* --check: report problems, never show alerts */
+static CFMachPortRef g_tap = NULL;
 
 /* Forward declarations */
+static void toggle_dictation(void);
 static void start_listening(void);
 static void stop_listening(void);
 static void inject_text(const char *text);
@@ -61,6 +71,7 @@ static void inject_text(const char *text);
 @interface DaemonDelegate : NSObject <NSApplicationDelegate>
 @property(strong) NSStatusItem *statusItem;
 @property(strong) NSMenuItem *toggleItem;
+@property(strong) NSMenuItem *noticeItem;
 @end
 
 @implementation DaemonDelegate
@@ -76,6 +87,19 @@ static void inject_text(const char *text);
 
   /* Build menu */
   NSMenu *menu = [[NSMenu alloc] init];
+
+  /* Items without an action are shown greyed out */
+  NSMenuItem *modeItem = [[NSMenuItem alloc]
+      initWithTitle:g_backend_openai ? @"模式：OpenAI 流式" : @"模式：本地模型"
+             action:nil
+      keyEquivalent:@""];
+  [menu addItem:modeItem];
+
+  self.noticeItem = [[NSMenuItem alloc] initWithTitle:@""
+                                               action:nil
+                                        keyEquivalent:@""];
+  self.noticeItem.hidden = YES;
+  [menu addItem:self.noticeItem];
 
   self.toggleItem =
       [[NSMenuItem alloc] initWithTitle:@"⌥Space 开始听写"
@@ -99,11 +123,7 @@ static void inject_text(const char *text);
 
 - (void)toggleDictation:(id)sender {
   (void)sender;
-  if (g_state == STATE_IDLE) {
-    start_listening();
-  } else {
-    stop_listening();
-  }
+  toggle_dictation();
 }
 
 - (void)quitApp:(id)sender {
@@ -118,6 +138,15 @@ static void inject_text(const char *text);
   dispatch_async(dispatch_get_main_queue(), ^{
     self.statusItem.button.title = icon;
     self.toggleItem.title = title;
+  });
+}
+
+/* Shows a one-line notice in the menu; nil hides it. Any thread. */
+- (void)showNotice:(NSString *)text {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    self.noticeItem.hidden = (text == nil);
+    if (text)
+      self.noticeItem.title = text;
   });
 }
 
@@ -328,6 +357,21 @@ static void stop_listening(void) {
   fprintf(stderr, "voxtral-daemon: stopped\n");
 }
 
+/* Shared by the hotkey and the menu item. Main thread. */
+static void toggle_dictation(void) {
+  if (g_backend_openai) {
+    /* Dictation through OpenAI is added by the following change; until then
+     * the hotkey is swallowed and nothing starts, so the local functions
+     * below are never called without a loaded model. */
+    return;
+  }
+  if (g_state == STATE_IDLE) {
+    start_listening();
+  } else {
+    stop_listening();
+  }
+}
+
 /* ========================================================================
  * Global Hotkey via CGEvent Tap
  * ======================================================================== */
@@ -340,7 +384,7 @@ static CGEventRef hotkey_callback(CGEventTapProxy proxy, CGEventType type,
   /* Re-enable tap if it gets disabled by the system */
   if (type == kCGEventTapDisabledByTimeout ||
       type == kCGEventTapDisabledByUserInput) {
-    CGEventTapEnable((CFMachPortRef)refcon, true);
+    CGEventTapEnable(g_tap, true);
     return event;
   }
 
@@ -357,11 +401,7 @@ static CGEventRef hotkey_callback(CGEventTapProxy proxy, CGEventType type,
                  kCGEventFlagMaskShift))) {
     /* Toggle dictation on main thread */
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (g_state == STATE_IDLE) {
-        start_listening();
-      } else {
-        stop_listening();
-      }
+      toggle_dictation();
     });
     return NULL; /* Swallow the event */
   }
@@ -371,40 +411,82 @@ static CGEventRef hotkey_callback(CGEventTapProxy proxy, CGEventType type,
 
 static int setup_hotkey_tap(void) {
   CGEventMask mask = CGEventMaskBit(kCGEventKeyDown);
-  CFMachPortRef tap =
-      CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
-                       kCGEventTapOptionDefault, mask, hotkey_callback, NULL);
+  g_tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
+                           kCGEventTapOptionDefault, mask, hotkey_callback,
+                           NULL);
 
-  if (!tap) {
+  if (!g_tap) {
     fprintf(stderr, "voxtral-daemon: cannot create event tap.\n"
                     "Please grant Accessibility permission:\n"
                     "  System Settings → Privacy & Security → Accessibility\n");
     return -1;
   }
 
-  /* Pass tap ref to callback for re-enable */
-  CGEventTapEnable(tap, true);
+  CGEventTapEnable(g_tap, true);
 
-  CFRunLoopSourceRef source = CFMachPortCreateRunLoopSource(NULL, tap, 0);
+  CFRunLoopSourceRef source = CFMachPortCreateRunLoopSource(NULL, g_tap, 0);
   CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
   CFRelease(source);
-  /* Don't release tap — must stay alive */
+  /* Don't release g_tap — must stay alive */
 
   return 0;
 }
 
 /* ========================================================================
- * Usage & Main
+ * Startup: configuration, validation, usage
  * ======================================================================== */
+
+/* Reports why the daemon cannot start and exits. Started from Finder there is
+ * no terminal to read stderr, so a dialog is shown as well. */
+static void fatal_startup(NSString *message) {
+  fprintf(stderr, "voxtral-daemon: %s\n", [message UTF8String]);
+  if (!g_check_only && !isatty(STDERR_FILENO)) {
+    NSApplication *app = [NSApplication sharedApplication];
+    [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    [app activateIgnoringOtherApps:YES];
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Voxtral 无法启动";
+    alert.informativeText = message;
+    [alert runModal];
+  }
+  exit(1);
+}
+
+static NSString *config_dir(void) {
+  const char *home = getenv("HOME");
+  NSString *base = (home && home[0]) ? [NSString stringWithUTF8String:home]
+                                     : NSHomeDirectory();
+  return [base stringByAppendingPathComponent:@".config/voxtral"];
+}
+
+/* Reads <config_dir>/config (a missing file is an empty one) and parses it.
+ * Returns 0, or -1 with a short reason in err. */
+static int load_config(vox_config_t *cfg, char *err, size_t err_len) {
+  NSString *path = [config_dir() stringByAppendingPathComponent:@"config"];
+  NSString *text = nil;
+  if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+    text = [NSString stringWithContentsOfFile:path
+                                     encoding:NSUTF8StringEncoding
+                                        error:nil];
+    if (!text) {
+      snprintf(err, err_len, "无法读取配置文件");
+      return -1;
+    }
+  }
+  return vox_config_parse(text ? [text UTF8String] : NULL, cfg, err, err_len);
+}
 
 static void usage(const char *prog) {
   fprintf(stderr, "voxtral-daemon — macOS voice dictation with Voxtral\n\n");
-  fprintf(stderr, "Usage: %s -d <model_dir> [options]\n\n", prog);
+  fprintf(stderr, "Usage: %s [options]\n\n", prog);
   fprintf(stderr, "Options:\n");
   fprintf(stderr, "  -d <dir>      Model directory (default: auto-detect)\n");
   fprintf(stderr, "  -I <secs>     Processing interval (default: %.1f)\n",
           DAEMON_DEFAULT_INTERVAL);
+  fprintf(stderr, "  --check       Validate settings, print the backend, exit\n");
   fprintf(stderr, "  -h            Show this help\n");
+  fprintf(stderr, "\nSettings: ~/.config/voxtral/config\n");
+  fprintf(stderr, "  backend = openai   send audio to OpenAI (default: local)\n");
   fprintf(stderr, "\nControls:\n");
   fprintf(stderr, "  ⌥Space        Toggle dictation on/off\n");
   fprintf(stderr, "  Menu bar 🎤   Click for options\n");
@@ -422,6 +504,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Error: -I requires a positive number\n");
         return 1;
       }
+    } else if (strcmp(argv[i], "--check") == 0) {
+      g_check_only = YES;
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       usage(argv[0]);
       return 0;
@@ -432,33 +516,58 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (!model_dir) {
-    /* Auto-detect model directory if not provided */
-    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-    NSString *alongsideApp = [[bundlePath stringByDeletingLastPathComponent]
-        stringByAppendingPathComponent:@"voxtral-model"];
-    NSString *inResources = [[[NSBundle mainBundle] resourcePath]
-        stringByAppendingPathComponent:@"voxtral-model"];
-    NSString *inCwd = @"./voxtral-model";
+  vox_config_t cfg;
+  char err[160];
+  if (load_config(&cfg, err, sizeof err) != 0)
+    fatal_startup([NSString stringWithFormat:@"配置无效：%s", err]);
 
-    NSArray *paths = @[ alongsideApp, inResources, inCwd ];
-    for (NSString *p in paths) {
-      BOOL isDir = NO;
-      if ([[NSFileManager defaultManager] fileExistsAtPath:p
-                                               isDirectory:&isDir] &&
-          isDir) {
-        model_dir = strdup([p UTF8String]);
-        break;
+  if (strcmp(cfg.backend, "openai") == 0) {
+    NSString *reason = nil;
+    g_api_key = VoxOpenAILoadKey(
+        [config_dir() stringByAppendingPathComponent:@"openai_key"], &reason);
+    if (!g_api_key)
+      fatal_startup(reason);
+    g_backend_openai = YES;
+    if (model_dir)
+      fprintf(stderr, "voxtral-daemon: API 模式，忽略 -d\n");
+  } else {
+    if (!model_dir) {
+      /* Auto-detect model directory if not provided */
+      NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+      NSString *alongsideApp = [[bundlePath stringByDeletingLastPathComponent]
+          stringByAppendingPathComponent:@"voxtral-model"];
+      NSString *inResources = [[[NSBundle mainBundle] resourcePath]
+          stringByAppendingPathComponent:@"voxtral-model"];
+      NSString *inCwd = @"./voxtral-model";
+
+      NSArray *paths = @[ alongsideApp, inResources, inCwd ];
+      for (NSString *p in paths) {
+        BOOL isDir = NO;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:p
+                                                 isDirectory:&isDir] &&
+            isDir) {
+          model_dir = strdup([p UTF8String]);
+          break;
+        }
       }
     }
+
+    BOOL isDir = NO;
+    if (!model_dir ||
+        ![[NSFileManager defaultManager]
+            fileExistsAtPath:[NSString stringWithUTF8String:model_dir]
+                 isDirectory:&isDir] ||
+        !isDir)
+      fatal_startup(@"找不到 voxtral-model：请放在 Voxtral.app 旁边、放进它的 "
+                    @"Resources，或用 -d 指定");
   }
 
-  if (!model_dir) {
-    fprintf(stderr, "Error: Could not find 'voxtral-model'.\n");
-    fprintf(stderr, "Please place 'voxtral-model' alongside Voxtral.app, in "
-                    "its Resources, or specify with -d.\n");
-    usage(argv[0]);
-    return 1;
+  if (g_check_only) {
+    if (g_backend_openai)
+      printf("backend: openai\n");
+    else
+      printf("backend: local (model: %s)\n", model_dir);
+    return 0;
   }
 
   /* Check accessibility permission */
@@ -472,26 +581,29 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  /* Silence voxtral status output (we do our own feedback) */
-  extern int vox_verbose;
-  vox_verbose = 0;
+  if (!g_backend_openai) {
+    /* Silence voxtral status output (we do our own feedback) */
+    extern int vox_verbose;
+    vox_verbose = 0;
 
 #ifdef USE_METAL
-  vox_metal_init();
+    vox_metal_init();
 #endif
 
-  /* Load model */
-  fprintf(stderr, "voxtral-daemon: loading model from %s...\n", model_dir);
-  g_ctx = vox_load(model_dir);
-  if (!g_ctx) {
-    fprintf(stderr, "voxtral-daemon: failed to load model\n");
-    return 1;
+    /* Load model */
+    fprintf(stderr, "voxtral-daemon: loading model from %s...\n", model_dir);
+    g_ctx = vox_load(model_dir);
+    if (!g_ctx) {
+      fprintf(stderr, "voxtral-daemon: failed to load model\n");
+      return 1;
+    }
+    fprintf(stderr, "voxtral-daemon: model loaded\n");
   }
-  fprintf(stderr, "voxtral-daemon: model loaded\n");
 
   /* Setup global hotkey */
   if (setup_hotkey_tap() != 0) {
-    vox_free(g_ctx);
+    if (g_ctx)
+      vox_free(g_ctx);
     return 1;
   }
 
@@ -507,12 +619,14 @@ int main(int argc, char **argv) {
   }
 
   /* Cleanup (reached on quit) */
-  if (g_state != STATE_IDLE)
-    stop_listening();
-  vox_free(g_ctx);
+  if (!g_backend_openai) {
+    if (g_state != STATE_IDLE)
+      stop_listening();
+    vox_free(g_ctx);
 #ifdef USE_METAL
-  vox_metal_shutdown();
+    vox_metal_shutdown();
 #endif
+  }
 
   return 0;
 }

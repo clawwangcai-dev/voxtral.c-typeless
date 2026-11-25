@@ -18,7 +18,7 @@ TARGET = voxtral
 # Debug build flags
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug info help blas mps inspect test test-dictation test-api daemon
+.PHONY: all clean debug info help blas mps inspect test test-dictation test-api test-daemon daemon
 
 # Default: show available targets
 all: help
@@ -38,6 +38,7 @@ endif
 	@echo "  make test           - Run regression tests (slow, needs fast GPU)"
 	@echo "  make test-dictation - Run dictation unit tests (fast, no model needed)"
 ifeq ($(UNAME_S),Darwin)
+	@echo "  make test-daemon    - Run daemon startup checks (fast, no model needed)"
 	@echo "  make test-api       - Run OpenAI session tests (needs network and an API key)"
 endif
 	@echo "  make clean          - Remove build artifacts"
@@ -104,11 +105,14 @@ endif
 # =============================================================================
 ifeq ($(UNAME_S),Darwin)
 ifeq ($(UNAME_M),arm64)
-DAEMON_SRC = voxtral_daemon.m
+DAEMON_SRC = voxtral_daemon.m voxtral_openai.m voxtral_dictation.c
 DAEMON_FRAMEWORKS = -framework AppKit -framework Carbon -framework CoreGraphics
 
 libvoxtral-mps.a: $(SRCS:.c=.mps.o) voxtral_metal.o
 	ar rcs $@ $^
+
+test-daemon: daemon
+	./test_daemon_startup.sh
 
 daemon: libvoxtral-mps.a $(DAEMON_SRC)
 	$(CC) $(MPS_OBJCFLAGS) -o voxtral-daemon $(DAEMON_SRC) \
