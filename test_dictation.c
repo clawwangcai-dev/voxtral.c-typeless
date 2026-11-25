@@ -116,6 +116,7 @@ static void test_text_final(void) {
   CHECK(final_after("新建一个 ", "新建一个") == NULL); /* only whitespace differs */
   CHECK(final_after("Marios在", "Marius在") == NULL);  /* mismatch: keep what was typed */
   CHECK(final_after("好", "") == NULL);
+  s = final_after("一个 ", "一个 PR");       CHECK(s && !strcmp(s, "PR")); free(s);   /* typed blank is not doubled */
 }
 static void test_text_new_item(void) {
   vox_text_t t; char out[128] = ""; char *s;
@@ -123,6 +124,27 @@ static void test_text_new_item(void) {
   feed(&t, out, "你好");
   s = vox_text_delta(&t, "item_2", "Hello");        CHECK(s && !strcmp(s, " Hello")); free(s);
   s = vox_text_final(&t, "item_2", "Hello world");  CHECK(s && !strcmp(s, " world")); free(s);
+  vox_text_free(&t);
+}
+
+static void test_text_edge_cases(void) {
+  vox_text_t t; char out[128] = ""; char *s;
+  vox_text_init(&t);
+  s = vox_text_delta(&t, NULL, "好");               CHECK(s && !strcmp(s, "好")); free(s); /* missing item id */
+  vox_text_free(&t);
+
+  vox_text_init(&t);
+  feed(&t, out, "\t\n PR"); feed(&t, out, "解决");
+  CHECK(strcmp(out, "PR 解决") == 0);               /* leading blanks of a dictation are dropped */
+  vox_text_free(&t);
+
+  char id_a[65], id_b[65];                          /* same first 63 bytes, differ after that */
+  memset(id_a, 'x', 63); memset(id_b, 'x', 63);
+  strcpy(id_a + 63, "A"); strcpy(id_b + 63, "B");
+  vox_text_init(&t);
+  s = vox_text_delta(&t, id_a, "你好"); free(s);
+  s = vox_text_delta(&t, id_b, "世界"); free(s);
+  CHECK(vox_text_final(&t, id_b, "你好世界") == NULL); /* one item, raw text continued */
   vox_text_free(&t);
 }
 
@@ -139,6 +161,7 @@ int main(void) {
   test_text_spacing();
   test_text_final();
   test_text_new_item();
+  test_text_edge_cases();
   if (failures) { printf("test_dictation: %d failed\n", failures); return 1; }
   printf("test_dictation: all passed\n");
   return 0;

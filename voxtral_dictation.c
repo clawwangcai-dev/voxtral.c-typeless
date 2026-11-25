@@ -114,6 +114,7 @@ void vox_text_free(vox_text_t *t) {
 
 /* Start a new item when item_id differs. last_cp is kept so spacing carries over. */
 static void select_item(vox_text_t *t, const char *item_id) {
+  if (!item_id) item_id = "";
   if (strncmp(t->item, item_id, sizeof(t->item) - 1) == 0) return;
   snprintf(t->item, sizeof(t->item), "%s", item_id);
   vox_text_free(t);
@@ -158,5 +159,10 @@ char *vox_text_final(vox_text_t *t, const char *item_id, const char *transcript)
   /* Only a longer transcript that starts with what was typed adds text. */
   if (full_n <= raw_n || memcmp(full, raw, raw_n) != 0) return NULL;
   if (set_raw(t, full, full_n) != 0) return NULL;
-  return spaced(t, full + raw_n, full_n - raw_n);
+  const char *suffix = full + raw_n;
+  size_t suffix_n = full_n - raw_n;
+  /* A blank already typed at the end must not be doubled by the suffix. */
+  if (t->last_cp < 0x80 && is_blank((char)t->last_cp))
+    while (suffix_n > 0 && is_blank(*suffix)) { suffix++; suffix_n--; }
+  return spaced(t, suffix, suffix_n);
 }
