@@ -194,7 +194,7 @@ To turn it on:
 | Setting | Default | Values |
 |---|---|---|
 | `backend` | `local` | `local`, `openai` |
-| `languages` | unset | comma-separated language codes, e.g. `zh,en,de` |
+| `languages` | unset | comma-separated language codes of ASCII letters, digits and `-`, e.g. `zh,en,de` or `zh-CN,en` |
 | `delay` | `low` | `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `keywords` | none | comma-separated words and terms, e.g. `Voxtral,Metal` |
 | `max_minutes` | `10` | `1` to `55` |
@@ -203,7 +203,9 @@ A change to `backend` takes effect after a restart; the other settings are read 
 
 If you mix several languages or use technical terms, set `languages` and `keywords`.
 
-In this mode your audio is uploaded to OpenAI. Audio is uploaded while there is sound; after a pause of 1.5 s (2.5 s with `delay = high` or `xhigh`) uploading pauses until you speak again. OpenAI bills by uploaded audio duration; the published price is 0.017 USD per minute. A single dictation ends by itself after `max_minutes`.
+In this mode your audio is uploaded to OpenAI. Audio is uploaded while sound is detected, and "sound" means anything about twice as loud as the background noise, not only your voice. After 1.5 s of silence (2.5 s with `delay = high` or `xhigh`) the upload pauses; when sound resumes, the 300 ms before it are uploaded too. Speech that is barely louder than the background can be skipped. OpenAI bills by uploaded audio duration; the published price is 0.017 USD per minute. A single dictation ends by itself after `max_minutes`. At the end of each dictation the daemon prints `voxtral-daemon: uploaded X.X s of Y.Y s captured` to stderr.
+
+The key is read when the daemon starts. After changing the key, restart the daemon.
 
 Checks:
 
