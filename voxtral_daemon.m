@@ -451,21 +451,14 @@ static void api_idle(VoxOpenAIStatus status) {
   NSString *notice = nil;
   switch (status) {
   case VoxOpenAIStatusOK:
-  case VoxOpenAIStatusTailUnconfirmed: {
-    /* The cap gets its own sound and notice, so the user can tell that the
-     * time limit, not a fault, ended the dictation. */
-    NSString *tail =
-        status == VoxOpenAIStatusTailUnconfirmed ? @"结尾可能不完整" : nil;
+  case VoxOpenAIStatusTailUnconfirmed:
+    /* The cap gets its own sound, so the user can tell that the time limit,
+     * not a fault, ended the dictation. */
     sound = g_cap_hit ? @"Glass" : @"Pop";
     icon = @"🎤";
-    if (g_cap_hit)
-      notice = [NSString
-          stringWithFormat:@"已到 %d 分钟上限，自动结束%@", g_max_minutes,
-                           tail ? [@"；" stringByAppendingString:tail] : @""];
-    else
-      notice = tail;
+    if (status == VoxOpenAIStatusTailUnconfirmed)
+      notice = @"结尾可能不完整";
     break;
-  }
   case VoxOpenAIStatusNetwork:
     notice = @"出错：网络";
     break;
@@ -479,6 +472,12 @@ static void api_idle(VoxOpenAIStatus status) {
     notice = @"出错：网络太慢";
     break;
   }
+  /* Whatever else happened, the menu says that the cap ended the dictation. */
+  if (g_cap_hit) {
+    NSString *cap =
+        [NSString stringWithFormat:@"已到 %d 分钟上限，自动结束", g_max_minutes];
+    notice = notice ? [NSString stringWithFormat:@"%@；%@", cap, notice] : cap;
+  }
   [[NSSound soundNamed:sound] play];
   [g_delegate updateIcon:icon menuTitle:@"⌥Space 开始听写"];
   [g_delegate showNotice:notice];
@@ -489,6 +488,9 @@ static void api_idle(VoxOpenAIStatus status) {
 static void api_done(uint64_t id, VoxOpenAIStatus status) {
   if (id != g_dictation_id)
     return;
+  /* g_session is still this dictation's session: only api_idle clears it. */
+  fprintf(stderr, "voxtral-daemon: uploaded %.1f s of %.1f s captured\n",
+          g_session.uploadedSeconds, g_session.capturedSeconds);
   /* Still listening means the session ended by itself; nobody has stopped
    * the audio yet. Otherwise api_stop's teardown is already queued ahead. */
   BOOL stop_audio = (g_state == STATE_LISTENING);
