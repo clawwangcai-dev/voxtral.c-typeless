@@ -679,6 +679,7 @@ git commit -m "feat: select dictation backend from config and add --check"
 | `OK` | `Pop` | 🎤 | 隐藏 |
 | `OK` 且 `g_cap_hit` | `Glass` | 🎤 | `已到 N 分钟上限，自动结束` |
 | `TailUnconfirmed` | `Pop` | 🎤 | `结尾可能不完整` |
+| `TailUnconfirmed` 且 `g_cap_hit` | `Glass` | 🎤 | `已到 N 分钟上限，自动结束；结尾可能不完整` |
 | `Network` | `Basso` | ⚠️ | `出错：网络` |
 | `Key` | `Basso` | ⚠️ | `出错：key 无效` |
 | `Rejected` | `Basso` | ⚠️ | `出错：服务端拒绝` |
