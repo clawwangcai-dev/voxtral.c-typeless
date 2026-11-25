@@ -8,7 +8,9 @@
  *
  * All state lives on one serial queue: feed:/finish hop onto it, and the URL
  * session delivers every delegate call and completion handler on it. Text
- * and the end status leave it only through the main queue, in order.
+ * and the end status leave it only through the main queue, in order. The
+ * two audio totals are the exception: they are copied to the main queue
+ * together with the end status and only read there.
  *
  * Nothing the server sends is printed or stored beyond the text to type.
  */
@@ -28,7 +30,7 @@
 #define PACKET 2400               /* 100 ms per append message */
 #define MIN_COMMIT 2400           /* the server rejects a commit of less than 100 ms */
 #define SLOW_LIMIT 240000         /* 10 s of audio waiting to be sent */
-#define FINAL_WAIT 2.0            /* seconds from commit to the final transcript */
+#define FINAL_WAIT 2.0            /* seconds from the commit being sent to the final transcript */
 #define COMMIT_WAIT 5.0           /* seconds from finish to the commit being sent */
 
 NSString *VoxOpenAILoadKey(NSString *path, NSString **reason) {
@@ -75,11 +77,13 @@ NSString *VoxOpenAILoadKey(NSString *path, NSString **reason) {
   NSMutableData *_pending;  /* passed the gate, not yet sent: 16-bit LE PCM */
   long _inFlight;           /* samples handed to sendMessage:, not yet completed */
   long _uploaded;           /* samples handed to sendMessage: in this session */
+  long _captured;           /* samples accepted from feed: in this session */
 
   BOOL _passed;     /* the gate has let at least one frame through */
   BOOL _configured; /* session.updated arrived; audio may be sent */
   BOOL _finishing;  /* finish was called */
-  BOOL _committed;  /* input_audio_buffer.commit was sent */
+  BOOL _committed;  /* input_audio_buffer.commit was handed to sendMessage: */
+  BOOL _commitSent; /* ... and the socket reported it sent */
   BOOL _ended;      /* onDone was dispatched; everything else is ignored */
 }
 
@@ -164,7 +168,7 @@ NSString *VoxOpenAILoadKey(NSString *path, NSString **reason) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                  (int64_t)(COMMIT_WAIT * NSEC_PER_SEC)),
                    self->_queue, ^{
-                     if (!self->_committed)
+                     if (!self->_commitSent)
                        [self endWith:VoxOpenAIStatusNetwork];
                    });
     [self pump];
@@ -176,6 +180,7 @@ NSString *VoxOpenAILoadKey(NSString *path, NSString **reason) {
 - (void)consume:(const float *)samples count:(int)n {
   if (_ended || _finishing)
     return;
+  _captured += n;
   while (n > 0) {
     float *frame = _ring[_frames % RING];
     int take = FRAME - _partial < n ? FRAME - _partial : n;
@@ -226,12 +231,18 @@ NSString *VoxOpenAILoadKey(NSString *path, NSString **reason) {
     return;
   }
   _committed = YES;
-  [self send:@"{\"type\":\"input_audio_buffer.commit\"}" samples:0];
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                               (int64_t)(FINAL_WAIT * NSEC_PER_SEC)),
-                 _queue, ^{
-                   [self endWith:VoxOpenAIStatusTailUnconfirmed];
-                 });
+  /* On a slow uplink the commit can wait behind the audio, so both waits
+   * count from the moment it has actually gone out. */
+  [self send:@"{\"type\":\"input_audio_buffer.commit\"}"
+      samples:0
+         sent:^{
+           self->_commitSent = YES;
+           dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                        (int64_t)(FINAL_WAIT * NSEC_PER_SEC)),
+                          self->_queue, ^{
+                            [self endWith:VoxOpenAIStatusTailUnconfirmed];
+                          });
+         }];
 }
 
 - (void)sendPacket:(int)n {
@@ -243,10 +254,13 @@ NSString *VoxOpenAILoadKey(NSString *path, NSString **reason) {
                            @"{\"type\":\"input_audio_buffer.append\","
                            @"\"audio\":\"%@\"}",
                            [pcm base64EncodedStringWithOptions:0]]
-      samples:n];
+      samples:n
+         sent:nil];
 }
 
-- (void)send:(NSString *)json samples:(int)n {
+/* `sent` (may be nil) runs once the socket has sent the message, unless the
+ * session has ended by then. */
+- (void)send:(NSString *)json samples:(int)n sent:(void (^)(void))sent {
   _inFlight += n;
   _uploaded += n;
   NSURLSessionWebSocketMessage *m =
@@ -256,6 +270,8 @@ NSString *VoxOpenAILoadKey(NSString *path, NSString **reason) {
         self->_inFlight -= n;
         if (error)
           [self endWith:VoxOpenAIStatusNetwork];
+        else if (sent && !self->_ended)
+          sent();
       }];
 }
 
@@ -346,7 +362,11 @@ static const char *string_field(id dict, NSString *name) {
   void (^onDone)(VoxOpenAIStatus) = _onDone;
   _onText = nil; /* the blocks may hold whoever holds this session */
   _onDone = nil;
+  double captured = (double)_captured / RATE;
+  double uploaded = (double)_uploaded / RATE;
   dispatch_async(dispatch_get_main_queue(), ^{
+    self->_capturedSeconds = captured;
+    self->_uploadedSeconds = uploaded;
     onDone(status);
   });
 }
@@ -361,7 +381,7 @@ static const char *string_field(id dict, NSString *name) {
   (void)protocol;
   if (_ended)
     return;
-  [self send:_sessionUpdate samples:0];
+  [self send:_sessionUpdate samples:0 sent:nil];
   [self receive];
 }
 
@@ -381,10 +401,16 @@ static const char *string_field(id dict, NSString *name) {
     didCompleteWithError:(NSError *)error {
   (void)session;
   (void)error;
+  /* 101 is a handshake that succeeded; any other HTTP status refused it. */
   NSHTTPURLResponse *http = (NSHTTPURLResponse *)task.response;
-  BOOL unauthorized = [http isKindOfClass:[NSHTTPURLResponse class]] &&
-                      http.statusCode == 401;
-  [self endWith:unauthorized ? VoxOpenAIStatusKey : VoxOpenAIStatusNetwork];
+  NSInteger code =
+      [http isKindOfClass:[NSHTTPURLResponse class]] ? http.statusCode : 0;
+  if (code == 401)
+    [self endWith:VoxOpenAIStatusKey];
+  else if (code != 0 && code != 101)
+    [self endWith:VoxOpenAIStatusRejected];
+  else
+    [self endWith:VoxOpenAIStatusNetwork];
 }
 
 @end

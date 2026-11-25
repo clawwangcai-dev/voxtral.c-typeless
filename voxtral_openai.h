@@ -9,10 +9,10 @@
 
 typedef NS_ENUM(NSInteger, VoxOpenAIStatus) {
   VoxOpenAIStatusOK = 0,
-  VoxOpenAIStatusTailUnconfirmed, /* final transcript failed or did not arrive within 2 s */
+  VoxOpenAIStatusTailUnconfirmed, /* final transcript failed or did not arrive within 2 s of the commit being sent */
   VoxOpenAIStatusNetwork,         /* cannot connect, connection lost, or commit not sent within 5 s of finish */
   VoxOpenAIStatusKey,             /* server rejected the API key */
-  VoxOpenAIStatusRejected,        /* server refused the session or reported an error */
+  VoxOpenAIStatusRejected,        /* server refused the connection (HTTP status) or the session, or reported an error */
   VoxOpenAIStatusSlow             /* more than 10 s of audio waiting to be sent */
 };
 
@@ -32,4 +32,9 @@ NSString *VoxOpenAILoadKey(NSString *path, NSString **reason);
                      onDone:(void (^)(VoxOpenAIStatus status))onDone;
 - (void)feed:(const float *)samples count:(int)n; /* 24 kHz mono; never blocks */
 - (void)finish;                                   /* never blocks; onDone follows */
+/* Seconds of audio the session accepted from feed:, and of those the seconds
+ * handed to the socket for upload. Main queue only; set just before onDone
+ * runs, 0 until then. */
+@property(nonatomic, readonly) double capturedSeconds;
+@property(nonatomic, readonly) double uploadedSeconds;
 @end
