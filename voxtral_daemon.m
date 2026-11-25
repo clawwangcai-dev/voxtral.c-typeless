@@ -77,6 +77,7 @@ static void inject_text(const char *text);
 static void api_start(void);
 static void api_stop(void);
 static int load_config(vox_config_t *cfg, char *err, size_t err_len);
+static NSString *config_notice(const char *err);
 
 /* ========================================================================
  * Menu Bar UI (NSStatusItem)
@@ -530,7 +531,7 @@ static void api_start(void) {
   vox_config_t cfg;
   char err[160];
   if (load_config(&cfg, err, sizeof err) != 0) {
-    api_start_failed([NSString stringWithFormat:@"配置无效：%s", err]);
+    api_start_failed(config_notice(err));
     return;
   }
   if (vox_mic_start_rate(API_SAMPLE_RATE) != 0) {
@@ -691,6 +692,15 @@ static int load_config(vox_config_t *cfg, char *err, size_t err_len) {
   return vox_config_parse(text ? [text UTF8String] : NULL, cfg, err, err_len);
 }
 
+/* "配置无效：<reason>" for a reason from load_config. The reason is UTF-8;
+ * one that is not still leaves "配置无效". */
+static NSString *config_notice(const char *err) {
+  NSString *reason = [NSString stringWithUTF8String:err];
+  if (reason.length == 0)
+    return @"配置无效";
+  return [NSString stringWithFormat:@"配置无效：%@", reason];
+}
+
 static void usage(const char *prog) {
   fprintf(stderr, "voxtral-daemon — macOS voice dictation with Voxtral\n\n");
   fprintf(stderr, "Usage: %s [options]\n\n", prog);
@@ -734,7 +744,7 @@ int main(int argc, char **argv) {
   vox_config_t cfg;
   char err[160];
   if (load_config(&cfg, err, sizeof err) != 0)
-    fatal_startup([NSString stringWithFormat:@"配置无效：%s", err]);
+    fatal_startup(config_notice(err));
 
   if (strcmp(cfg.backend, "openai") == 0) {
     NSString *reason = nil;

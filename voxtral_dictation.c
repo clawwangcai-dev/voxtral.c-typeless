@@ -178,10 +178,33 @@ static const char *trim_line(const char *s, size_t *n) {
   return s;
 }
 
+/* Cut s before a UTF-8 character that its end leaves incomplete. */
+static void cut_partial_char(char *s) {
+  size_t n = strlen(s), lead = n;
+  while (lead > 0 && ((unsigned char)s[lead - 1] & 0xC0) == 0x80) lead--;
+  if (lead == 0) return;
+  lead--; /* the byte that starts the last character */
+  unsigned char c = (unsigned char)s[lead];
+  size_t want = (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+  if (n - lead < want) s[lead] = '\0';
+}
+
+/* A long name is cut to fit err, on a character boundary. */
 static int config_fail(char *err, size_t err_len, const char *head, const char *name, size_t name_n,
                        const char *tail) {
-  if (err_len > 0) snprintf(err, err_len, "%s%.*s%s", head, (int)name_n, name, tail);
+  if (err_len == 0) return -1;
+  int len = snprintf(err, err_len, "%s%.*s%s", head, (int)name_n, name, tail);
+  if (len >= 0 && (size_t)len >= err_len) cut_partial_char(err);
   return -1;
+}
+
+/* Comma separated language codes of ASCII letters, digits and '-' only (e.g. "zh-CN,en"). */
+static int is_language_list(const char *s) {
+  for (; *s; s++)
+    if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') ||
+          *s == '-' || *s == ','))
+      return 0;
+  return 1;
 }
 
 /*
@@ -256,6 +279,7 @@ static int config_apply(vox_config_t *cfg, const char *name, size_t name_n, cons
     size_t cap = is_keywords ? sizeof cfg->keywords : sizeof cfg->languages;
     if (copy_list(tmp, cap, v, n) != 0) { *why = " 的值太长"; return -1; }
     if (is_keywords && (strchr(tmp, '<') || strchr(tmp, '>'))) return -1;
+    if (!is_keywords && !is_language_list(tmp)) return -1; /* a typo, or a fullwidth comma */
     if (tmp[0]) memcpy(dst, tmp, strlen(tmp) + 1); /* a list of only commas is also "not written" */
     return 0;
   }
