@@ -8,6 +8,7 @@
  */
 
 #import <Foundation/Foundation.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,7 +119,7 @@ static const char *status_name(VoxOpenAIStatus status) {
 
 /* Printed only when a scenario failed. The text is the transcript of our own
  * sample audio; server error text never reaches the test. */
-static void explain(const char *name, Recorder *r) {
+static void explain(const char *name, Recorder *r, VoxOpenAISession *s) {
   double from = r.finishAt > 0 ? r.finishAt : r.startedAt;
   const char *since = r.finishAt > 0 ? "finish" : "start";
   if (r.doneCount > 0)
@@ -132,15 +133,18 @@ static void explain(const char *name, Recorder *r) {
            r.firstTextAt - r.startedAt);
   printf("  %s: %d text callbacks: \"%s\"\n", name, r.textCount,
          normalize(r.allText).UTF8String);
+  printf("  %s: uploaded %.2f s of %.2f s captured\n", name, s.uploadedSeconds,
+         s.capturedSeconds);
 }
 
 static VoxOpenAISession *start(Recorder *r, NSString *key,
-                               NSString *languages, NSURL *endpoint) {
+                               NSString *languages, NSString *keywords,
+                               NSURL *endpoint) {
   r.startedAt = CFAbsoluteTimeGetCurrent();
   return [[VoxOpenAISession alloc] initWithKey:key
       languages:languages
       delay:@"low"
-      keywords:@""
+      keywords:keywords
       endpoint:endpoint
       onText:^(NSString *text) {
         if (r.textCount == 0)
@@ -197,7 +201,7 @@ static void test_dead_endpoint(void) {
   int before = failures;
   Recorder *r = [Recorder new];
   VoxOpenAISession *s =
-      start(r, @"sk-x", @"", [NSURL URLWithString:@"wss://127.0.0.1:9/"]);
+      start(r, @"sk-x", @"", @"", [NSURL URLWithString:@"wss://127.0.0.1:9/"]);
   CHECK(wait_until(^{ return (BOOL)(r.doneCount == 1); }, 10));
   CHECK(r.status == VoxOpenAIStatusNetwork && r.textCount == 0);
   [s finish];
@@ -206,25 +210,41 @@ static void test_dead_endpoint(void) {
   if (failures == before)
     printf("ok B\n");
   else
-    explain("B", r);
+    explain("B", r, s);
 }
 
 /* The real endpoint refuses a made-up key; no audio is sent. */
 static void test_invalid_key(void) {
   int before = failures;
   Recorder *r = [Recorder new];
-  VoxOpenAISession *s = start(r, @"sk-invalid", @"", nil);
+  VoxOpenAISession *s = start(r, @"sk-invalid", @"", @"", nil);
   CHECK(wait_until(^{ return (BOOL)(r.doneCount == 1); }, 10) &&
         r.status == VoxOpenAIStatusKey && r.textCount == 0);
   (void)s;
   if (failures == before)
     printf("ok C\n");
   else
-    explain("C", r);
+    explain("C", r, s);
+}
+
+/* Occurrences of `phrase` in `text`, not overlapping. */
+static int count_of(NSString *text, NSString *phrase) {
+  int count = 0;
+  NSRange from = NSMakeRange(0, text.length);
+  for (;;) {
+    NSRange r = [text rangeOfString:phrase options:0 range:from];
+    if (r.location == NSNotFound)
+      return count;
+    count++;
+    from.location = NSMaxRange(r);
+    from.length = text.length - from.location;
+  }
 }
 
 /* A real speech in real time: text arrives while audio is still being
- * uploaded, and the final transcript arrives after finish. */
+ * uploaded, and the final transcript arrives after finish. Two languages and
+ * a keyword make the server check every field of session.update; a phrase
+ * typed twice would show up as a second occurrence. */
 static void test_speech(NSString *key) {
   int before = failures;
   int n = 0;
@@ -233,7 +253,7 @@ static void test_speech(NSString *key) {
   if (!audio)
     return;
   Recorder *r = [Recorder new];
-  VoxOpenAISession *s = start(r, key, @"en", nil);
+  VoxOpenAISession *s = start(r, key, @"en,de", @"country", nil);
   for (int i = 0; i < n; i += 2400) {
     [s feed:audio + i count:(n - i < 2400 ? n - i : 2400)];
     wait_until(^{ return NO; }, 0.1);
@@ -244,12 +264,16 @@ static void test_speech(NSString *key) {
   CHECK(r.firstTextAt > 0 && r.firstTextAt < r.finishAt);
   CHECK(wait_until(^{ return (BOOL)(r.doneCount == 1); }, 10) &&
         r.status == VoxOpenAIStatusOK);
-  CHECK([normalize(r.allText)
-      containsString:@"ask not what your country can do for you"]);
+  CHECK(count_of(normalize(r.allText),
+                 @"ask not what your country can do for you") == 1);
+  /* Everything fed was accepted; the speech is never silent long enough to
+   * pause the upload. */
+  CHECK(fabs(s.capturedSeconds - n / 24000.0) < 0.001);
+  CHECK(s.uploadedSeconds > 5 && s.uploadedSeconds <= s.capturedSeconds);
   if (failures == before)
     printf("ok D\n");
   else
-    explain("D", r);
+    explain("D", r, s);
 }
 
 /* One second of digital silence, then finish: nothing was said. */
@@ -257,17 +281,18 @@ static void test_silence(NSString *key) {
   int before = failures;
   float *zeros = calloc(24000, sizeof(float));
   Recorder *r = [Recorder new];
-  VoxOpenAISession *s = start(r, key, @"", nil);
+  VoxOpenAISession *s = start(r, key, @"", @"", nil);
   [s feed:zeros count:24000];
   r.finishAt = CFAbsoluteTimeGetCurrent();
   [s finish];
   free(zeros);
   CHECK(wait_until(^{ return (BOOL)(r.doneCount == 1); }, 2) &&
         r.status == VoxOpenAIStatusOK && r.textCount == 0);
+  CHECK(s.capturedSeconds == 1.0 && s.uploadedSeconds == 0);
   if (failures == before)
     printf("ok E\n");
   else
-    explain("E", r);
+    explain("E", r, s);
 }
 
 int main(void) {

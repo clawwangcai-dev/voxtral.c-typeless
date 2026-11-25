@@ -148,6 +148,20 @@ static void test_text_edge_cases(void) {
   vox_text_free(&t);
 }
 
+/* Every multi-byte sequence in s is complete. */
+static int utf8_complete(const char *s) {
+  const unsigned char *p = (const unsigned char *)s;
+  while (*p) {
+    int len = *p < 0x80 ? 1 : (*p & 0xE0) == 0xC0 ? 2 : (*p & 0xF0) == 0xE0 ? 3
+            : (*p & 0xF8) == 0xF0 ? 4 : 0;
+    if (len == 0) return 0;
+    for (int i = 1; i < len; i++)
+      if ((p[i] & 0xC0) != 0x80) return 0;
+    p += len;
+  }
+  return 1;
+}
+
 static void test_config(void) {
   vox_config_t c; char err[128];
 
@@ -182,6 +196,20 @@ static void test_config(void) {
   char big[2100] = "keywords = "; /* too long is an error, never a truncation */
   memset(big + 11, 'a', 2000); big[2011] = 0;
   CHECK(vox_config_parse(big, &c, err, sizeof err) == -1);
+
+  /* A fullwidth comma typed with a Chinese input method is not a separator. */
+  CHECK(vox_config_parse("languages = zh\xef\xbc\x8c" "en", &c, err, sizeof err) == -1 &&
+        strstr(err, "languages"));
+  CHECK(vox_config_parse("languages = zh-CN, en", &c, err, sizeof err) == 0 &&
+        !strcmp(c.languages, "zh-CN,en"));
+
+  /* The reason for an over-long unknown name is cut between characters. The
+   * daemon's buffer is 160 bytes, which does not end on a character boundary. */
+  char long_name[400] = "", reason[160];
+  for (int i = 0; i < 100; i++) strcat(long_name, "键");
+  strcat(long_name, " = 1");
+  CHECK(vox_config_parse(long_name, &c, reason, sizeof reason) == -1);
+  CHECK(strlen(reason) > 100 && utf8_complete(reason));
 }
 
 int main(void) {
