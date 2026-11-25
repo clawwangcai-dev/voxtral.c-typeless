@@ -30,6 +30,17 @@ make test
 cat audio.wav | ./voxtral -d voxtral-model --stdin
 ffmpeg -i samples/I_have_a_dream.ogg -f s16le -ar 16000 -ac 1 - | ./voxtral -d voxtral-model --stdin
 
+# Dictation daemon (macOS menu bar app, Option+Space toggles dictation)
+make daemon                      # builds voxtral-daemon
+./voxtral-daemon --check         # validate ~/.config/voxtral/config and key, print backend
+# API mode: "backend = openai" in ~/.config/voxtral/config, key in
+# ~/.config/voxtral/openai_key (mode 600) or OPENAI_API_KEY; audio goes to OpenAI
+
+# Fast tests (no model needed)
+make test-dictation              # config parser, silence gate, text assembly
+make test-daemon                 # daemon startup checks (--check)
+make test-api                    # OpenAI session (network + key; billed API calls)
+
 # Download model (~8.9GB)
 ./download_model.sh
 
@@ -51,6 +62,12 @@ voxtral_kernels.c/.h        - Math kernels (matmul, attention, norms)
 voxtral_safetensors.c/.h    - Safetensors reader (mmap)
 voxtral_mic.h               - Microphone capture API
 voxtral_mic_macos.c         - macOS mic capture (AudioQueue)
+voxtral_daemon.m            - macOS dictation daemon (menu bar, hotkey, local or API mode)
+voxtral_openai.m/.h         - OpenAI realtime transcription session (API mode)
+voxtral_dictation.c/.h      - API-mode rules: config parser, silence gate, text assembly
+test_dictation.c            - Unit tests for voxtral_dictation.c
+test_openai.m               - OpenAI session tests (real service)
+test_daemon_startup.sh      - Daemon --check startup tests
 voxtral_metal.m/.h          - Metal GPU backend
 voxtral_shaders.metal       - Metal compute shaders
 python_simple_implementation.py - Self-contained Python reference

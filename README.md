@@ -177,6 +177,39 @@ To use it:
 3. Press **Option+Space** anywhere to toggle listening on/off. A menu bar icon (🎤/🔴) will show the current status.
 *(The app will prompt you for Accessibility permission on first launch in order to synthesize keyboard events).*
 
+**OpenAI streaming mode**
+The daemon can send the microphone audio to OpenAI's realtime transcription service instead of running the local model. No model is loaded in this mode, and text is typed while you are still speaking. Typed text is never taken back.
+
+To turn it on:
+1. Write `backend = openai` into `~/.config/voxtral/config`.
+2. Put your OpenAI API key into `~/.config/voxtral/openai_key` with permission 600 (`chmod 600 ~/.config/voxtral/openai_key`), or set the environment variable `OPENAI_API_KEY`. The environment variable wins when both exist. `Voxtral.app` started from Finder does not see your shell's environment variables, so use the key file there.
+3. Restart the daemon. The menu shows `模式：OpenAI 流式`.
+
+`~/.config/voxtral/config` holds one `name = value` per line; `#` starts a comment, and a missing file means all defaults:
+
+| Setting | Default | Values |
+|---|---|---|
+| `backend` | `local` | `local`, `openai` |
+| `languages` | unset | comma-separated language codes, e.g. `zh,en,de` |
+| `delay` | `low` | `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `keywords` | none | comma-separated words and terms, e.g. `Voxtral,Metal` |
+| `max_minutes` | `10` | `1` to `55` |
+
+A change to `backend` takes effect after a restart; the other settings are read again at every Option+Space. An invalid config stops the daemon from starting, and once it is running, an invalid config makes Option+Space show `配置无效` in the menu instead of starting.
+
+If you mix several languages or use technical terms, set `languages` and `keywords`.
+
+In this mode your audio is uploaded to OpenAI. Audio is uploaded while there is sound; after a pause of 1.5 s (2.5 s with `delay = high` or `xhigh`) uploading pauses until you speak again. OpenAI bills by uploaded audio duration; the published price is 0.017 USD per minute. A single dictation ends by itself after `max_minutes`.
+
+Checks:
+
+```bash
+./voxtral-daemon --check   # validate config and key, print the backend, exit
+make test-dictation        # config parser, silence gate and text assembly (offline)
+make test-api              # OpenAI session against the real service (needs network and a key; billed)
+make test-daemon           # startup checks for backend selection and failure reasons
+```
+
 If the model falls behind real-time, a warning is printed and audio is skipped to catch up.
 
 `--from-mic`, `--stdin`, and `-i` are mutually exclusive.

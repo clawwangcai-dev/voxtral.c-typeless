@@ -14,10 +14,8 @@
 #include <string.h>
 #include <stdio.h>
 
-#define MIC_SAMPLE_RATE   16000
 #define MIC_NUM_BUFFERS   3
-#define MIC_BUF_SAMPLES   1600   /* 100ms per AudioQueue buffer */
-#define RING_CAPACITY     160000 /* 10 seconds at 16kHz */
+#define RING_CAPACITY     160000 /* 10 s at 16 kHz, about 6.6 s at 24 kHz */
 
 static AudioQueueRef            queue;
 static AudioQueueBufferRef      buffers[MIC_NUM_BUFFERS];
@@ -56,8 +54,12 @@ static void mic_callback(void *userdata,
 }
 
 int vox_mic_start(void) {
+    return vox_mic_start_rate(16000);
+}
+
+int vox_mic_start_rate(int sample_rate) {
     AudioStreamBasicDescription fmt = {0};
-    fmt.mSampleRate       = MIC_SAMPLE_RATE;
+    fmt.mSampleRate       = sample_rate;
     fmt.mFormatID         = kAudioFormatLinearPCM;
     fmt.mFormatFlags      = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
     fmt.mBitsPerChannel   = 16;
@@ -73,8 +75,8 @@ int vox_mic_start(void) {
         return -1;
     }
 
-    /* Allocate and enqueue capture buffers */
-    UInt32 buf_bytes = MIC_BUF_SAMPLES * sizeof(int16_t);
+    /* Allocate and enqueue capture buffers, 100 ms each */
+    UInt32 buf_bytes = (UInt32)(sample_rate / 10) * sizeof(int16_t);
     for (int i = 0; i < MIC_NUM_BUFFERS; i++) {
         AudioQueueAllocateBuffer(queue, buf_bytes, &buffers[i]);
         AudioQueueEnqueueBuffer(queue, buffers[i], 0, NULL);
@@ -129,6 +131,11 @@ void vox_mic_stop(void) {
 #include <stdio.h>
 
 int vox_mic_start(void) {
+    return vox_mic_start_rate(16000);
+}
+
+int vox_mic_start_rate(int sample_rate) {
+    (void)sample_rate;
     fprintf(stderr, "Microphone capture is not supported on this platform\n");
     return -1;
 }

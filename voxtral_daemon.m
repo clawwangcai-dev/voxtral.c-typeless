@@ -11,7 +11,8 @@
  *
  * Controls:
  *   Option+Space  - Toggle dictation on/off
- *   Menu bar icon  - Shows status (🎤 idle, 🔴 listening)
+ *   Menu bar icon  - Shows status (🎤 idle, 🔴 listening, ⚠️ last start or
+ *                    dictation failed)
  */
 
 #import <AppKit/AppKit.h>
@@ -40,6 +41,8 @@
 #define MIC_BUF_SIZE 4800            /* 300ms max read */
 #define HOTKEY_KEYCODE 49            /* Space bar */
 #define HOTKEY_MODIFIERS kCGEventFlagMaskAlternate /* Option key */
+#define API_SAMPLE_RATE 24000        /* what VoxOpenAISession expects */
+#define API_READ_SAMPLES 2400        /* 100ms at 24kHz per read */
 
 /* ========================================================================
  * Daemon State
@@ -58,11 +61,22 @@ static NSString *g_api_key = nil; /* set only when g_backend_openai */
 static BOOL g_check_only = NO;    /* --check: report problems, never show alerts */
 static CFMachPortRef g_tap = NULL;
 
+/* API mode only. Everything except g_teardown_q is read and written on the
+ * main queue. */
+static uint64_t g_dictation_id;      /* current dictation; callbacks of older ones are dropped */
+static VoxOpenAISession *g_session;  /* nil when idle */
+static dispatch_queue_t g_teardown_q; /* serial: stops thread and microphone off the main thread */
+static int g_max_minutes;            /* time cap of the current dictation */
+static BOOL g_cap_hit;               /* the current dictation was ended by the cap */
+
 /* Forward declarations */
 static void toggle_dictation(void);
 static void start_listening(void);
 static void stop_listening(void);
 static void inject_text(const char *text);
+static void api_start(void);
+static void api_stop(void);
+static int load_config(vox_config_t *cfg, char *err, size_t err_len);
 
 /* ========================================================================
  * Menu Bar UI (NSStatusItem)
@@ -128,7 +142,12 @@ static void inject_text(const char *text);
 
 - (void)quitApp:(id)sender {
   (void)sender;
-  if (g_state != STATE_IDLE) {
+  if (g_backend_openai) {
+    /* Nothing is flushed: the session ends with the process. While flushing
+     * the teardown queue owns the microphone. */
+    if (g_state == STATE_LISTENING)
+      vox_mic_stop();
+  } else if (g_state != STATE_IDLE) {
     stop_listening();
   }
   [NSApp terminate:nil];
@@ -361,9 +380,10 @@ static void stop_listening(void) {
 /* Shared by the hotkey and the menu item. Main thread. */
 static void toggle_dictation(void) {
   if (g_backend_openai) {
-    /* Dictation through OpenAI is added by the following change; until then
-     * the hotkey is swallowed and nothing starts, so the local functions
-     * below are never called without a loaded model. */
+    if (g_state == STATE_IDLE)
+      api_start();
+    else
+      api_stop();
     return;
   }
   if (g_state == STATE_IDLE) {
@@ -371,6 +391,186 @@ static void toggle_dictation(void) {
   } else {
     stop_listening();
   }
+}
+
+/* ========================================================================
+ * API Mode Dictation (OpenAI)
+ *
+ *   idle --api_start--> listening --> flushing --api_idle--> idle
+ *
+ * listening becomes flushing on api_stop (hotkey, menu or time cap), or in
+ * api_done when the session ends by itself (e.g. the network is lost).
+ *
+ * Stopping never waits on the main thread: the audio thread is joined and the
+ * microphone stopped on g_teardown_q. api_idle runs only after a block on
+ * g_teardown_q that was queued after every teardown of this dictation, and
+ * only after onDone, which follows every onText; so nothing is typed after
+ * the end sound.
+ * ======================================================================== */
+
+/* Owns a strong reference to the session for its whole life (handed over by
+ * api_start, released when the thread returns), so it never uses a released
+ * session even though api_idle clears g_session. */
+static void *api_audio_thread_func(void *arg) {
+  VoxOpenAISession *session = (__bridge_transfer VoxOpenAISession *)arg;
+  float buf[API_READ_SAMPLES];
+  while (g_audio_running) {
+    @autoreleasepool {
+      int n = vox_mic_read(buf, API_READ_SAMPLES);
+      if (n > 0)
+        [session feed:buf count:n];
+      else
+        usleep(10000); /* 10ms idle */
+    }
+  }
+  return NULL;
+}
+
+/* Teardown queue only; called once per dictation, on leaving listening. */
+static void api_stop_audio(void) {
+  g_audio_running = 0;
+  pthread_join(g_audio_thread, NULL);
+  vox_mic_stop();
+}
+
+/* A dictation could not start. Main queue. */
+static void api_start_failed(NSString *notice) {
+  [g_delegate showNotice:notice];
+  [g_delegate updateIcon:@"⚠️" menuTitle:@"⌥Space 开始听写"];
+  [[NSSound soundNamed:@"Basso"] play];
+}
+
+/* Back to idle with the end sound and notice for `status`. Main queue. */
+static void api_idle(VoxOpenAIStatus status) {
+  g_state = STATE_IDLE;
+  g_session = nil;
+
+  NSString *sound = @"Basso";
+  NSString *icon = @"⚠️";
+  NSString *notice = nil;
+  switch (status) {
+  case VoxOpenAIStatusOK:
+    sound = g_cap_hit ? @"Glass" : @"Pop";
+    icon = @"🎤";
+    if (g_cap_hit)
+      notice = [NSString
+          stringWithFormat:@"已到 %d 分钟上限，自动结束", g_max_minutes];
+    break;
+  case VoxOpenAIStatusTailUnconfirmed:
+    sound = @"Pop";
+    icon = @"🎤";
+    notice = @"结尾可能不完整";
+    break;
+  case VoxOpenAIStatusNetwork:
+    notice = @"出错：网络";
+    break;
+  case VoxOpenAIStatusKey:
+    notice = @"出错：key 无效";
+    break;
+  case VoxOpenAIStatusRejected:
+    notice = @"出错：服务端拒绝";
+    break;
+  case VoxOpenAIStatusSlow:
+    notice = @"出错：网络太慢";
+    break;
+  }
+  [[NSSound soundNamed:sound] play];
+  [g_delegate updateIcon:icon menuTitle:@"⌥Space 开始听写"];
+  [g_delegate showNotice:notice];
+  fprintf(stderr, "voxtral-daemon: stopped\n");
+}
+
+/* The session of dictation `id` has ended. Main queue. */
+static void api_done(uint64_t id, VoxOpenAIStatus status) {
+  if (id != g_dictation_id)
+    return;
+  /* Still listening means the session ended by itself; nobody has stopped
+   * the audio yet. Otherwise api_stop's teardown is already queued ahead. */
+  BOOL stop_audio = (g_state == STATE_LISTENING);
+  if (stop_audio)
+    g_state = STATE_FLUSHING;
+  dispatch_async(g_teardown_q, ^{
+    if (stop_audio)
+      api_stop_audio();
+    dispatch_async(dispatch_get_main_queue(), ^{
+      api_idle(status);
+    });
+  });
+}
+
+/* Main queue. While flushing a second press does nothing. */
+static void api_stop(void) {
+  if (g_state != STATE_LISTENING)
+    return;
+  g_state = STATE_FLUSHING;
+  VoxOpenAISession *session = g_session;
+  dispatch_async(g_teardown_q, ^{
+    api_stop_audio();
+    /* What the microphone captured before it stopped still belongs to this
+     * dictation. */
+    float buf[API_READ_SAMPLES];
+    int n;
+    while ((n = vox_mic_read(buf, API_READ_SAMPLES)) > 0)
+      [session feed:buf count:n];
+    [session finish];
+  });
+}
+
+/* Main queue. */
+static void api_start(void) {
+  if (g_state != STATE_IDLE)
+    return;
+
+  /* Read on every start, so edits apply without a restart. The key is the
+   * one loaded at launch. */
+  vox_config_t cfg;
+  char err[160];
+  if (load_config(&cfg, err, sizeof err) != 0) {
+    api_start_failed([NSString stringWithFormat:@"配置无效：%s", err]);
+    return;
+  }
+  if (vox_mic_start_rate(API_SAMPLE_RATE) != 0) {
+    api_start_failed(@"出错：麦克风");
+    return;
+  }
+
+  uint64_t id = ++g_dictation_id;
+  g_cap_hit = NO;
+  g_max_minutes = cfg.max_minutes;
+  [g_delegate showNotice:nil];
+
+  g_session = [[VoxOpenAISession alloc]
+      initWithKey:g_api_key
+        languages:@(cfg.languages)
+            delay:@(cfg.delay)
+         keywords:@(cfg.keywords)
+         endpoint:nil
+           onText:^(NSString *text) {
+             if (id != g_dictation_id)
+               return;
+             inject_text(text.UTF8String);
+           }
+           onDone:^(VoxOpenAIStatus status) {
+             api_done(id, status);
+           }];
+
+  g_state = STATE_LISTENING;
+  g_audio_running = 1;
+  pthread_create(&g_audio_thread, NULL, api_audio_thread_func,
+                 (__bridge_retained void *)g_session);
+  [[NSSound soundNamed:@"Tink"] play];
+  [g_delegate updateIcon:@"🔴" menuTitle:@"⌥Space 停止听写"];
+  fprintf(stderr, "voxtral-daemon: listening...\n");
+
+  /* A forgotten dictation must not keep uploading. */
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                               (int64_t)cfg.max_minutes * 60 * NSEC_PER_SEC),
+                 dispatch_get_main_queue(), ^{
+                   if (id == g_dictation_id && g_state == STATE_LISTENING) {
+                     g_cap_hit = YES;
+                     api_stop();
+                   }
+                 });
 }
 
 /* ========================================================================
@@ -529,6 +729,8 @@ int main(int argc, char **argv) {
     if (!g_api_key)
       fatal_startup(reason);
     g_backend_openai = YES;
+    g_teardown_q =
+        dispatch_queue_create("voxtral.teardown", DISPATCH_QUEUE_SERIAL);
     if (model_dir)
       fprintf(stderr, "voxtral-daemon: API 模式，忽略 -d\n");
   } else {
