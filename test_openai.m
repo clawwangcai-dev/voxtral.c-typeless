@@ -90,7 +90,10 @@ static void write_file(NSString *path, const char *text, mode_t mode) {
 @property int textCount;
 @property int doneCount;
 @property VoxOpenAIStatus status;
+@property double startedAt;
 @property double firstTextAt;
+@property double finishAt; /* 0 = finish not called */
+@property double doneAt;
 @property(strong) NSMutableString *allText;
 @end
 @implementation Recorder
@@ -101,8 +104,39 @@ static void write_file(NSString *path, const char *text, mode_t mode) {
 }
 @end
 
+static const char *status_name(VoxOpenAIStatus status) {
+  switch (status) {
+  case VoxOpenAIStatusOK: return "OK";
+  case VoxOpenAIStatusTailUnconfirmed: return "TailUnconfirmed";
+  case VoxOpenAIStatusNetwork: return "Network";
+  case VoxOpenAIStatusKey: return "Key";
+  case VoxOpenAIStatusRejected: return "Rejected";
+  case VoxOpenAIStatusSlow: return "Slow";
+  }
+  return "?";
+}
+
+/* Printed only when a scenario failed. The text is the transcript of our own
+ * sample audio; server error text never reaches the test. */
+static void explain(const char *name, Recorder *r) {
+  double from = r.finishAt > 0 ? r.finishAt : r.startedAt;
+  const char *since = r.finishAt > 0 ? "finish" : "start";
+  if (r.doneCount > 0)
+    printf("  %s: status %s, doneCount %d, ended %.2f s after %s\n", name,
+           status_name(r.status), r.doneCount, r.doneAt - from, since);
+  else
+    printf("  %s: never ended (%.2f s after %s), doneCount 0\n", name,
+           CFAbsoluteTimeGetCurrent() - from, since);
+  if (r.textCount > 0)
+    printf("  %s: first text %.2f s after start\n", name,
+           r.firstTextAt - r.startedAt);
+  printf("  %s: %d text callbacks: \"%s\"\n", name, r.textCount,
+         normalize(r.allText).UTF8String);
+}
+
 static VoxOpenAISession *start(Recorder *r, NSString *key,
                                NSString *languages, NSURL *endpoint) {
+  r.startedAt = CFAbsoluteTimeGetCurrent();
   return [[VoxOpenAISession alloc] initWithKey:key
       languages:languages
       delay:@"low"
@@ -115,6 +149,8 @@ static VoxOpenAISession *start(Recorder *r, NSString *key,
         [r.allText appendString:text];
       }
       onDone:^(VoxOpenAIStatus status) {
+        if (r.doneCount == 0)
+          r.doneAt = CFAbsoluteTimeGetCurrent();
         r.doneCount++;
         r.status = status;
       }];
@@ -169,6 +205,8 @@ static void test_dead_endpoint(void) {
   CHECK(r.doneCount == 1);
   if (failures == before)
     printf("ok B\n");
+  else
+    explain("B", r);
 }
 
 /* The real endpoint refuses a made-up key; no audio is sent. */
@@ -181,6 +219,8 @@ static void test_invalid_key(void) {
   (void)s;
   if (failures == before)
     printf("ok C\n");
+  else
+    explain("C", r);
 }
 
 /* A real speech in real time: text arrives while audio is still being
@@ -198,16 +238,18 @@ static void test_speech(NSString *key) {
     [s feed:audio + i count:(n - i < 2400 ? n - i : 2400)];
     wait_until(^{ return NO; }, 0.1);
   }
-  double finishCalledAt = CFAbsoluteTimeGetCurrent();
+  r.finishAt = CFAbsoluteTimeGetCurrent();
   [s finish];
   free(audio);
-  CHECK(r.firstTextAt > 0 && r.firstTextAt < finishCalledAt);
+  CHECK(r.firstTextAt > 0 && r.firstTextAt < r.finishAt);
   CHECK(wait_until(^{ return (BOOL)(r.doneCount == 1); }, 10) &&
         r.status == VoxOpenAIStatusOK);
   CHECK([normalize(r.allText)
       containsString:@"ask not what your country can do for you"]);
   if (failures == before)
     printf("ok D\n");
+  else
+    explain("D", r);
 }
 
 /* One second of digital silence, then finish: nothing was said. */
@@ -217,12 +259,15 @@ static void test_silence(NSString *key) {
   Recorder *r = [Recorder new];
   VoxOpenAISession *s = start(r, key, @"", nil);
   [s feed:zeros count:24000];
+  r.finishAt = CFAbsoluteTimeGetCurrent();
   [s finish];
   free(zeros);
   CHECK(wait_until(^{ return (BOOL)(r.doneCount == 1); }, 2) &&
         r.status == VoxOpenAIStatusOK && r.textCount == 0);
   if (failures == before)
     printf("ok E\n");
+  else
+    explain("E", r);
 }
 
 int main(void) {
