@@ -166,3 +166,134 @@ char *vox_text_final(vox_text_t *t, const char *item_id, const char *transcript)
     while (suffix_n > 0 && is_blank(*suffix)) { suffix++; suffix_n--; }
   return spaced(t, suffix, suffix_n);
 }
+
+/* ---- Config file parsing ---- */
+
+static int is_space(char c) { return c == ' ' || c == '\t' || c == '\r'; }
+
+/* Same as trim() but also drops '\r', so CRLF files parse like LF files. */
+static const char *trim_line(const char *s, size_t *n) {
+  while (*n > 0 && is_space(*s)) { s++; (*n)--; }
+  while (*n > 0 && is_space(s[*n - 1])) (*n)--;
+  return s;
+}
+
+static int config_fail(char *err, size_t err_len, const char *head, const char *name, size_t name_n,
+                       const char *tail) {
+  if (err_len > 0) snprintf(err, err_len, "%s%.*s%s", head, (int)name_n, name, tail);
+  return -1;
+}
+
+/*
+ * Copy a comma separated list into dst (size cap) with each item trimmed and
+ * empty items dropped. Returns 0, or -1 when the result does not fit.
+ * An empty result leaves dst "".
+ */
+static int copy_list(char *dst, size_t cap, const char *s, size_t n) {
+  size_t out = 0;
+  const char *end = s + n;
+  while (s <= end) {
+    const char *comma = memchr(s, ',', (size_t)(end - s));
+    size_t item_n = (size_t)((comma ? comma : end) - s);
+    const char *item = trim_line(s, &item_n);
+    if (item_n > 0) {
+      size_t need = item_n + (out > 0 ? 1 : 0);
+      if (out + need >= cap) return -1;
+      if (out > 0) dst[out++] = ',';
+      memcpy(dst + out, item, item_n);
+      out += item_n;
+    }
+    if (!comma) break;
+    s = comma + 1;
+  }
+  dst[out] = '\0';
+  return 0;
+}
+
+/* Set dst (size cap) to one of the `allowed` words (NULL-terminated), or fail. */
+static int copy_word(char *dst, size_t cap, const char *s, size_t n, const char *const *allowed,
+                     const char **why) {
+  if (n >= cap) { *why = " 的值太长"; return -1; }
+  for (; *allowed; allowed++)
+    if (strlen(*allowed) == n && memcmp(*allowed, s, n) == 0) {
+      memcpy(dst, s, n);
+      dst[n] = '\0';
+      return 0;
+    }
+  *why = " 的值无效";
+  return -1;
+}
+
+/* Apply one `name = value` pair (value non-empty). Returns 0, or -1 with *why set. */
+static int config_apply(vox_config_t *cfg, const char *name, size_t name_n, const char *v, size_t n,
+                        const char **why) {
+  static const char *const backends[] = {"local", "openai", NULL};
+  static const char *const delays[] = {"minimal", "low", "medium", "high", "xhigh", NULL};
+#define IS(key) (name_n == strlen(key) && memcmp(name, key, name_n) == 0)
+  if (!IS("backend") && !IS("delay") && !IS("max_minutes") && !IS("languages") && !IS("keywords")) {
+    *why = NULL; /* unknown name */
+    return -1;
+  }
+  if (n == 0) return 0; /* an empty value means "not written" */
+  *why = " 的值无效";
+  if (IS("backend")) return copy_word(cfg->backend, sizeof cfg->backend, v, n, backends, why);
+  if (IS("delay")) return copy_word(cfg->delay, sizeof cfg->delay, v, n, delays, why);
+  if (IS("max_minutes")) {
+    int minutes = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (v[i] < '0' || v[i] > '9') return -1;
+      minutes = minutes * 10 + (v[i] - '0');
+      if (minutes > 55) return -1;
+    }
+    if (minutes < 1) return -1;
+    cfg->max_minutes = minutes;
+    return 0;
+  }
+  { /* languages or keywords */
+    int is_keywords = IS("keywords");
+    char tmp[sizeof cfg->keywords];
+    char *dst = is_keywords ? cfg->keywords : cfg->languages;
+    size_t cap = is_keywords ? sizeof cfg->keywords : sizeof cfg->languages;
+    if (copy_list(tmp, cap, v, n) != 0) { *why = " 的值太长"; return -1; }
+    if (is_keywords && (strchr(tmp, '<') || strchr(tmp, '>'))) return -1;
+    if (tmp[0]) memcpy(dst, tmp, strlen(tmp) + 1); /* a list of only commas is also "not written" */
+    return 0;
+  }
+}
+
+int vox_config_parse(const char *text, vox_config_t *cfg, char *err, size_t err_len) {
+  if (err_len > 0) err[0] = '\0';
+  memset(cfg, 0, sizeof(*cfg));
+  snprintf(cfg->backend, sizeof cfg->backend, "local");
+  snprintf(cfg->delay, sizeof cfg->delay, "low");
+  cfg->max_minutes = 10;
+  if (!text) return 0;
+  if (strncmp(text, "\xef\xbb\xbf", 3) == 0) text += 3;
+
+  for (int line_no = 1; *text; line_no++) {
+    const char *eol = strchr(text, '\n');
+    size_t n = eol ? (size_t)(eol - text) : strlen(text);
+    const char *line = text;
+    text += n + (eol ? 1 : 0);
+
+    const char *hash = memchr(line, '#', n);
+    if (hash) n = (size_t)(hash - line);
+    line = trim_line(line, &n);
+    if (n == 0) continue;
+
+    const char *eq = memchr(line, '=', n);
+    if (!eq) {
+      if (err_len > 0) snprintf(err, err_len, "第 %d 行缺少 =", line_no);
+      return -1;
+    }
+    size_t name_n = (size_t)(eq - line), value_n = n - name_n - 1;
+    const char *name = trim_line(line, &name_n);
+    const char *value = trim_line(eq + 1, &value_n);
+
+    const char *why;
+    if (config_apply(cfg, name, name_n, value, value_n, &why) == 0) continue;
+    if (!why) return config_fail(err, err_len, "不认识的配置项 ", name, name_n, "");
+    return config_fail(err, err_len, "", name, name_n, why);
+  }
+  return 0;
+}

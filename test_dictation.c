@@ -148,6 +148,42 @@ static void test_text_edge_cases(void) {
   vox_text_free(&t);
 }
 
+static void test_config(void) {
+  vox_config_t c; char err[128];
+
+  CHECK(vox_config_parse(NULL, &c, err, sizeof err) == 0);
+  CHECK(!strcmp(c.backend, "local") && !strcmp(c.delay, "low") && c.max_minutes == 10);
+  CHECK(!c.languages[0] && !c.keywords[0]);
+
+  const char *spec_example =
+      "backend = openai\nlanguages = zh,en,de\ndelay = low\n"
+      "keywords = Leistungsverzeichnis, Einzelpreis, Gesamtpreis\nmax_minutes = 10\n";
+  CHECK(vox_config_parse(spec_example, &c, err, sizeof err) == 0);
+  CHECK(!strcmp(c.backend, "openai") && !strcmp(c.languages, "zh,en,de"));
+  CHECK(!strcmp(c.keywords, "Leistungsverzeichnis,Einzelpreis,Gesamtpreis"));
+
+  /* BOM, CRLF, comments, blank lines, empty list items and an empty value */
+  CHECK(vox_config_parse("\xef\xbb\xbf# mine\r\n\r\n  languages = zh, en ,, de   # mixed\r\ndelay =\r\n",
+                         &c, err, sizeof err) == 0);
+  CHECK(!strcmp(c.languages, "zh,en,de") && !strcmp(c.delay, "low"));
+  CHECK(vox_config_parse("keywords = 报价单, Größe", &c, err, sizeof err) == 0);
+  CHECK(!strcmp(c.keywords, "报价单,Größe"));
+  CHECK(vox_config_parse("max_minutes = 55", &c, err, sizeof err) == 0 && c.max_minutes == 55);
+
+  const char *bad[] = {"delay = fast", "backend = cloud", "keywords = a<b", "keywords = a>b",
+                       "max_minutes = 0", "max_minutes = 56", "max_minutes = ten",
+                       "langauges = zh", "delay low"};
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    err[0] = 0;
+    CHECK(vox_config_parse(bad[i], &c, err, sizeof err) == -1 && err[0]);
+  }
+  CHECK(vox_config_parse("delay = fast", &c, err, sizeof err) == -1 && strstr(err, "delay"));
+
+  char big[2100] = "keywords = "; /* too long is an error, never a truncation */
+  memset(big + 11, 'a', 2000); big[2011] = 0;
+  CHECK(vox_config_parse(big, &c, err, sizeof err) == -1);
+}
+
 int main(void) {
   test_gate_noise_stays_closed();
   test_gate_zero_frames_do_not_stick();
@@ -162,6 +198,7 @@ int main(void) {
   test_text_final();
   test_text_new_item();
   test_text_edge_cases();
+  test_config();
   if (failures) { printf("test_dictation: %d failed\n", failures); return 1; }
   printf("test_dictation: all passed\n");
   return 0;

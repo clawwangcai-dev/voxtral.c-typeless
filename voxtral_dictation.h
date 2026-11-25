@@ -46,4 +46,17 @@ void vox_text_free(vox_text_t *t);
 char *vox_text_delta(vox_text_t *t, const char *item_id, const char *delta);
 char *vox_text_final(vox_text_t *t, const char *item_id, const char *transcript);
 
+/* Settings from ~/.config/voxtral/config. */
+typedef struct {
+  char backend[8];     /* "local" | "openai" */
+  char languages[128]; /* "zh,en,de"; "" = unset */
+  char delay[8];       /* minimal | low | medium | high | xhigh */
+  char keywords[1024]; /* "a,b,c"; "" = none */
+  int max_minutes;     /* 1..55 */
+} vox_config_t;
+
+/* Fills the defaults, then applies `text` (the file's contents; NULL = no file).
+ * Returns 0, or -1 with a short reason in `err`. */
+int vox_config_parse(const char *text, vox_config_t *cfg, char *err, size_t err_len);
+
 #endif /* VOXTRAL_DICTATION_H */
