@@ -7,6 +7,8 @@
 #ifndef VOXTRAL_DICTATION_H
 #define VOXTRAL_DICTATION_H
 
+#include <stddef.h>
+
 /* One call per 10 ms frame. */
 #define VOX_GATE_PREROLL 30 /* frames re-sent when speech resumes (300 ms) */
 
@@ -25,5 +27,23 @@ void vox_gate_init(vox_gate_t *g, int hang_frames);
 int vox_gate_push(vox_gate_t *g, float rms);
 /* Root mean square of n samples in [-1, 1]. */
 float vox_frame_rms(const float *samples, int n);
+
+/*
+ * Text assembly. Typed text is never taken back, so these functions only
+ * return text to append. A space is added between Chinese and Latin text
+ * (letters and digits) when the model did not write one.
+ */
+typedef struct {
+  char item[64];    /* item_id the raw text belongs to */
+  char *raw;        /* deltas received for `item`, concatenated */
+  size_t raw_len;
+  unsigned last_cp; /* last code point typed in this dictation; 0 = nothing yet */
+} vox_text_t;
+
+void vox_text_init(vox_text_t *t);
+void vox_text_free(vox_text_t *t);
+/* Both return malloc'd UTF-8 to type (caller frees), or NULL when there is nothing to type. */
+char *vox_text_delta(vox_text_t *t, const char *item_id, const char *delta);
+char *vox_text_final(vox_text_t *t, const char *item_id, const char *transcript);
 
 #endif /* VOXTRAL_DICTATION_H */
