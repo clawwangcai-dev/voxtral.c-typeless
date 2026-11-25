@@ -142,7 +142,8 @@ static void inject_text(const char *text);
 }
 
 /* Shows a one-line notice in the menu; nil hides it. Any thread. */
-- (void)showNotice:(NSString *)text {
+- (void)showNotice:(NSString *)notice {
+  NSString *text = [notice copy]; /* the caller may pass a mutable string */
   dispatch_async(dispatch_get_main_queue(), ^{
     self.noticeItem.hidden = (text == nil);
     if (text)

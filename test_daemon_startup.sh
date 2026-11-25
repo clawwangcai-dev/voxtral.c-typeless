@@ -57,7 +57,7 @@ run_case() {
   fi
 }
 
-run_case "bad delay" 1 "配置无效" "" none nokey
+run_case "bad delay" 1 "配置无效.*delay" "" none nokey
 run_case "no key" 1 "找不到 OpenAI key" "" cfg_only nokey
 run_case "key mode 644" 1 "600" "" key644 nokey
 run_case "no model" 1 "voxtral-model" "" none nokey
